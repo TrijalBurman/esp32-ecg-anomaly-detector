@@ -277,6 +277,22 @@ firmware/esp32_ad8232_stream/esp32_ad8232_stream.ino
 7. Open Serial Monitor only for quick testing.
 8. Close Serial Monitor before running the Streamlit dashboard.
 
+The Arduino sketch is already in the correct Arduino IDE folder format:
+
+```text
+firmware/esp32_ad8232_stream/esp32_ad8232_stream.ino
+```
+
+Arduino IDE requires the `.ino` file and parent folder to have the same name. This project already follows that rule.
+
+Inside the sketch, this line controls whether a CSV header is printed:
+
+```cpp
+const bool PRINT_CSV_HEADER = false;
+```
+
+Keep it `false` for the cleanest dashboard serial stream. You can set it to `true` while testing in Arduino Serial Monitor.
+
 Arduino IDE board manager URL:
 
 ```text
@@ -869,4 +885,3 @@ Expected model output:
 ```text
 N, S, V, F, Q probabilities
 ```
-
