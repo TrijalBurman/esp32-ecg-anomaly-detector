@@ -299,6 +299,25 @@ Arduino IDE board manager URL:
 https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
 ```
 
+### Compile With Arduino CLI
+
+Arduino CLI can also compile the firmware without opening Arduino IDE.
+
+Install/update the ESP32 core:
+
+```powershell
+arduino-cli core update-index
+arduino-cli core install esp32:esp32
+```
+
+Compile the sketch:
+
+```powershell
+arduino-cli compile --fqbn esp32:esp32:esp32 firmware\esp32_ad8232_stream
+```
+
+This project was successfully compiled using Arduino CLI `1.5.1` and ESP32 core `3.3.10`.
+
 ## Machine Learning Dataset
 
 The model is trained on the MIT-BIH Arrhythmia Database using the `wfdb` Python package.
@@ -653,11 +672,16 @@ Workflow:
 9. Plotly displays ECG and R-peak markers.
 10. Streamlit displays:
    - BPM
+   - overall class based on the majority of classified beats in the capture window
+   - agreement percentage for the overall class
+   - overall median confidence
    - latest class
-   - confidence
-   - sample rate
+   - latest confidence
+   - sample rate in the status caption
    - lead-off percentage
    - classification table
+
+The `Overall class` is intended to be the stable result for the full capture window. It uses majority voting across detected beats, with summed confidence as a tie-breaker. One or two incorrect beat predictions therefore do not normally change the overall label. `Latest class` remains available to show the most recently detected beat.
 
 ## How All Files Work Together
 

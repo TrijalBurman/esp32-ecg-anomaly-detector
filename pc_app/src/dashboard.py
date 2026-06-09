@@ -115,6 +115,27 @@ def classify_beats(model: tf.keras.Model, labels: list[str], ecg: np.ndarray, pe
     return rows
 
 
+def summarize_predictions(predictions: list[dict], labels: list[str]) -> tuple[str, float, float]:
+    if not predictions:
+        return "None", 0.0, 0.0
+
+    vote_counts = {label: 0 for label in labels}
+    confidence_sums = {label: 0.0 for label in labels}
+    for prediction in predictions:
+        label = prediction["class"]
+        vote_counts[label] += 1
+        confidence_sums[label] += float(prediction["confidence"])
+
+    overall_class = max(
+        labels,
+        key=lambda label: (vote_counts[label], confidence_sums[label]),
+    )
+    matching = [prediction for prediction in predictions if prediction["class"] == overall_class]
+    agreement = len(matching) / len(predictions)
+    overall_confidence = float(np.median([prediction["confidence"] for prediction in matching]))
+    return overall_class, agreement, overall_confidence
+
+
 def main() -> None:
     st.set_page_config(page_title="ESP32 ECG Anomaly Dashboard", layout="wide")
     st.title("ESP32 ECG Anomaly Dashboard")
@@ -199,13 +220,17 @@ def main() -> None:
     chart.plotly_chart(plot_ecg(times, ecg, peaks), use_container_width=True)
 
     latest = predictions[-1]["class"] if predictions else "None"
-    confidence = predictions[-1]["confidence"] if predictions else 0.0
-    col1, col2, col3, col4 = metrics.columns(4)
+    latest_confidence = predictions[-1]["confidence"] if predictions else 0.0
+    overall_class, agreement, overall_confidence = summarize_predictions(predictions, labels)
+
+    col1, col2, col3, col4, col5, col6 = metrics.columns(6)
     col1.metric("BPM", "--" if bpm is None else f"{bpm:.1f}")
-    col2.metric("Latest class", latest)
-    col3.metric("Confidence", f"{confidence:.2f}")
-    col4.metric("Sample rate", f"{actual_sample_rate:.1f} Hz")
-    st.caption(f"Lead-off samples: {lead_off_pct:.1f}%")
+    col2.metric("Overall class", overall_class)
+    col3.metric("Agreement", f"{agreement * 100.0:.0f}%")
+    col4.metric("Overall confidence", f"{overall_confidence:.2f}")
+    col5.metric("Latest class", latest)
+    col6.metric("Latest confidence", f"{latest_confidence:.2f}")
+    st.caption(f"Sample rate: {actual_sample_rate:.1f} Hz | Lead-off samples: {lead_off_pct:.1f}%")
 
     if predictions:
         table.dataframe(predictions, use_container_width=True, hide_index=True)

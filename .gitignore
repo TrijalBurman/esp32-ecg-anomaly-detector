@@ -1,9 +1,9 @@
 __pycache__/
 *.py[cod]
 .venv/
+.tools/
 
 pc_app/data/
 pc_app/models/*.keras
 pc_app/models/*.tflite
 pc_app/models/*.json
-
