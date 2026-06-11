@@ -35,9 +35,11 @@ Generated files:
 
 Last training run result:
 
-- Test accuracy: about `94.31%`
+- Test accuracy: **`98.2%`** (after SMOTE resampling)
+- Validation accuracy: `99.8%`
+- Training stopped at epoch 23 / 30 (early stopping on `val_loss`)
 - Classes: `N`, `S`, `V`, `F`, `Q`
-- Note: `S` and `F` are harder because they have fewer examples in MIT-BIH.
+- SMOTE is applied only to the training split to balance minority classes (`S`, `F`) without leaking synthetic data into the test set.
 
 ## High-Level Working
 
@@ -189,8 +191,8 @@ If TensorFlow fails on Python 3.14, install/use Python 3.12 or 3.11.
 
 - `numpy`: numerical arrays
 - `scipy`: filtering, resampling, and peak detection
-- `pandas`: table/data handling support
-- `scikit-learn`: train/test split, class weights, metrics
+- `imbalanced-learn`: SMOTE oversampling for minority class balancing
+- `scikit-learn`: train/test split, metrics
 - `tensorflow`: CNN model training and inference
 - `wfdb`: MIT-BIH dataset download and reading
 - `pyserial`: COM port reading from ESP32
@@ -388,15 +390,17 @@ Purpose:
 
 ### `detect_r_peaks(samples, fs)`
 
-Detects likely R-peaks using `scipy.signal.find_peaks`.
+Detects R-peaks using `scipy.signal.find_peaks` with several noise-rejection steps.
 
-It:
+Steps:
 
-- Filters the ECG
-- Centers the signal around its median
-- Flips the signal if peaks appear inverted
-- Uses minimum peak distance of about `0.25 seconds`
-- Uses prominence based on signal standard deviation
+1. Bandpass filter the ECG.
+2. Centre the signal around its median.
+3. Flip the signal if peaks appear inverted (handles reversed electrode polarity).
+4. **Artifact suppression**: clip the signal to ±4σ before peak detection. This prevents large electrode lift-off spikes at the end of a capture window from being counted as beats.
+5. **Physiological refractory period**: minimum distance between peaks set to **0.40 seconds** (`100 samples at 250 Hz`). This prevents the ECG T-wave (which arrives ~0.30 s after the R-peak) from being double-counted as a second heartbeat — a common cause of 2× BPM inflation on noisy signals.
+6. **Prominence threshold**: peaks must be prominent relative to neighbouring signal (`0.8 × std`).
+7. **Height floor**: peaks must also be above `mean + 1.0 × std` to reject low-amplitude noise blips that pass the prominence test.
 
 Output:
 
@@ -414,9 +418,11 @@ It:
 
 - Finds differences between consecutive peaks
 - Converts sample differences to seconds
-- Rejects impossible intervals outside `0.25` to `2.5` seconds
+- Rejects intervals outside the physiological range: **0.40 s to 2.0 s** (30–150 BPM)
 - Uses the median R-R interval
 - Converts it to BPM using `60 / RR`
+
+The upper bound of 150 BPM matches the 0.40 s refractory period used in `detect_r_peaks`.
 
 ### `extract_beat_window(samples, peak_index, fs)`
 
@@ -515,10 +521,10 @@ python src\train_mitbih.py
    - Extract the ECG beat window around the annotated beat
    - Resample to `256` samples
    - Normalize the beat
-8. Split into train and test sets using stratified split.
-9. Compute class weights to reduce class imbalance problems.
-10. Train the 1D CNN.
-11. Evaluate on the test set.
+8. Split into **train (80%)** and **test (20%)** sets using stratified split.
+9. Apply **SMOTE** (Synthetic Minority Over-sampling Technique) to the **training split only** to balance under-represented classes (`S`, `F`). SMOTE is never applied to the test split, so test metrics reflect real-world class distribution.
+10. Train the 1D CNN with `ReduceLROnPlateau` (halves LR when `val_loss` stalls for 2 epochs) and `EarlyStopping` (patience 5, restores best weights).
+11. Evaluate on the held-out test set.
 12. Save the model and reports.
 
 ### Training Outputs
@@ -650,38 +656,37 @@ Workflow:
 1. `load_classifier()` loads:
    - `models/ecg_aami_cnn.keras`
    - `models/label_map.json`
-2. Sidebar controls select:
-   - data source mode
-   - serial port
-   - baud rate
-   - capture duration
-   - MIT-BIH preview record
-3. If preview mode is selected:
+2. Session state is initialised for:
+   - `live_running`: tracks whether continuous streaming is active
+   - `ecg_figure`: stores the last Plotly ECG figure across reruns
+   - `last_predictions`: stores the last beat classification table across reruns
+3. Sidebar controls select data source, serial port, baud rate, capture window, and MIT-BIH record.
+4. The ECG chart and predictions table are rendered from session state **before** the new capture begins, so they remain visible during the 10-second read.
+5. If preview mode is selected:
    - `load_preview_segment()` reads ECG from MIT-BIH
-4. If live mode is selected:
-   - `read_samples()` reads serial data from ESP32
+6. If live mode is selected:
+   - `read_samples()` reads serial data from the ESP32 COM port
    - `samples_to_arrays()` converts ADC readings to volts
    - `estimate_sample_rate()` estimates actual sample rate from ESP32 timestamps
-5. The ECG is filtered with `bandpass_ecg()`.
-6. R-peaks are detected with `detect_r_peaks()`.
-7. BPM is calculated using `bpm_from_peaks()`.
-8. For every detected R-peak:
-   - `extract_beat_window()` extracts the beat segment
-   - The model predicts class probabilities
-   - The dashboard stores time, class, confidence, and per-class probabilities
-9. Plotly displays ECG and R-peak markers.
-10. Streamlit displays:
-   - BPM
-   - overall class based on the majority of classified beats in the capture window
-   - agreement percentage for the overall class
-   - overall median confidence
-   - latest class
-   - latest confidence
-   - sample rate in the status caption
-   - lead-off percentage
-   - classification table
+7. The ECG is filtered with `bandpass_ecg()`.
+8. R-peaks are detected with `detect_r_peaks()` (see preprocessing section).
+9. BPM is calculated using `bpm_from_peaks()`.
+10. For every detected R-peak:
+    - `extract_beat_window()` extracts the beat segment
+    - The CNN model predicts class probabilities
+    - The dashboard stores time, class, confidence, and per-class probabilities
+11. The Plotly figure is built with `plot_ecg()`:
+    - A 9-point moving-average smoothing is applied **for display only** — it does not affect model inputs
+    - ECG line rendered in teal (`#00e5cc`), R-peak markers in red (`#ff4d6d`)
+    - Transparent dark background to match the dashboard theme
+12. The figure and predictions table are saved to session state and rendered immediately.
+13. In live mode, `st.rerun()` fires after a 0.3 s sleep to begin the next capture window automatically.
+14. Streamlit displays:
+    - BPM, overall class, agreement %, overall confidence, latest class, latest confidence
+    - Sample rate and lead-off percentage caption
+    - Full per-beat classification table
 
-The `Overall class` is intended to be the stable result for the full capture window. It uses majority voting across detected beats, with summed confidence as a tie-breaker. One or two incorrect beat predictions therefore do not normally change the overall label. `Latest class` remains available to show the most recently detected beat.
+The `Overall class` uses majority voting across detected beats with summed confidence as a tie-breaker. `Latest class` shows only the most recent beat.
 
 ## How All Files Work Together
 
@@ -777,17 +782,27 @@ The final local training report is saved in:
 pc_app/models/training_report.json
 ```
 
-The model performs well on common classes such as `N`, `V`, and `Q`. `S` and `F` are less reliable because there are fewer examples and these classes are more subtle.
+### Current Results (after SMOTE rebalancing)
 
-For a serious research-quality model, improvements could include:
+| Metric | Value |
+| --- | --- |
+| Test accuracy | **98.2%** |
+| Validation accuracy | 99.8% |
+| Training epochs | 23 (early stopping) |
 
-- Patient-wise train/test split
-- More robust R-peak detection
-- Data augmentation
-- Better handling of class imbalance
-- Larger CNN or CNN-LSTM architecture
-- Calibration of probabilities
-- Validation on live AD8232-collected data
+SMOTE synthetic oversampling was applied to the training split to address the large class imbalance in MIT-BIH (`N` has ~75,000 beats; `F` has ~800). This brought minority class performance from poor to acceptable without leaking synthetic data into the test set.
+
+Note: validation accuracy (99.8%) is slightly higher than training accuracy (98.4%) because the training set contains both real and harder synthetic SMOTE beats, while the validation split contains real beats only.
+
+### Limitations
+
+For a research-quality system, further improvements could include:
+
+- Patient-wise train/test split (current split may share patient data across sets)
+- CNN-LSTM or attention-based architecture
+- Calibrated probability outputs
+- Domain adaptation from MIT-BIH clinical ECG to noisy AD8232 live signals
+- Personalised per-user calibration
 
 ## Troubleshooting
 
@@ -842,14 +857,15 @@ Try:
 
 ### BPM looks wrong
 
-Possible reasons:
+Possible reasons and fixes:
 
-- R-peaks are not detected correctly
-- Signal is too noisy
-- Electrode placement is unstable
-- The capture window is too short
-
-Try increasing the capture window to `15` or `20` seconds.
+| Symptom | Likely cause | Fix |
+| --- | --- | --- |
+| BPM ≈ 2× actual heart rate | T-wave being counted as a second beat | Fixed in v2: refractory period increased to 0.40 s |
+| BPM very high (>150 at rest) | Noise peaks detected as beats | Fixed in v2: height floor (`mean + 1σ`) rejects noise blips |
+| BPM spikes at end of window | Electrode lift-off artifact | Fixed in v2: signal clipped to ±4σ before detection |
+| BPM shows `--` | Fewer than 2 peaks detected | Signal too weak — check electrodes and skin contact |
+| BPM varies window to window | Short capture window | Increase capture window to `15` or `20` seconds |
 
 ### Classification looks wrong on live data
 

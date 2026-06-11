@@ -1,56 +1,60 @@
 # ESP32 ECG Anomaly Detector
 
-ESP32 + AD8232 heartbeat anomaly detector with a MIT-BIH-trained ML model and Streamlit dashboard.
+ESP32 + AD8232 heartbeat anomaly detector with a MIT-BIH-trained 1D CNN model and a live Streamlit dashboard.
 
-The ESP32 streams ECG samples from an AD8232 sensor to a PC over UART. The Python dashboard filters the ECG, detects R-peaks, calculates BPM, extracts beat windows, and classifies beats into:
+The ESP32 streams ECG samples from an AD8232 sensor at 250 Hz to a PC over UART. The Python dashboard filters the ECG, detects R-peaks, calculates BPM, extracts beat windows, and classifies each beat into one of five AAMI classes:
 
-- `N`: normal and bundle branch beats
-- `S`: supraventricular ectopic beats
-- `V`: ventricular ectopic beats
-- `F`: fusion beats
-- `Q`: unknown, paced, or unclassifiable beats
+| Class | Meaning |
+| --- | --- |
+| `N` | Normal and bundle branch beats |
+| `S` | Supraventricular ectopic beats |
+| `V` | Ventricular ectopic beats |
+| `F` | Fusion beats |
+| `Q` | Unknown / paced / unclassifiable beats |
 
-> This is an educational prototype, not a medical device.
+> **This is an educational prototype, not a medical device.**
 
-## Preview
-
-![Dashboard preview](dashboard_preview.png)
+---
 
 ## Hardware
 
 - ESP32 development board
 - AD8232 ECG module
-- Three electrodes: `RA`, `LA`, `RL`
+- Three ECG electrode pads (`RA`, `LA`, `RL`)
 - USB cable
-- PC for training and dashboard
+- PC with Python 3.11 or 3.12
 
 ## Wiring
 
-| AD8232 pin | ESP32 pin |
+| AD8232 pin | ESP32 pin | Purpose |
+| --- | --- | --- |
+| `OUTPUT` | `GPIO34` | Analog ECG signal |
+| `LO+` | `GPIO26` | Lead-off detection |
+| `LO-` | `GPIO27` | Lead-off detection |
+| `3.3V` | `3V3` | Sensor power |
+| `GND` | `GND` | Common ground |
+
+Electrode placement:
+
+| Electrode | Location |
 | --- | --- |
-| `OUTPUT` | `GPIO34` |
-| `LO+` | `GPIO26` |
-| `LO-` | `GPIO27` |
-| `3.3V` | `3V3` |
-| `GND` | `GND` |
+| `RA` | Right wrist |
+| `LA` | Left wrist |
+| `RL` | Right ankle (reference) |
 
-Electrodes:
+Use adhesive Ag/AgCl ECG pads for the cleanest signal.
 
-- `RA`: right wrist
-- `LA`: left wrist
-- `RL`: right ankle
+---
 
 ## Quick Start
 
 ### 1. Flash ESP32
 
-Open this sketch in Arduino IDE:
+Open in Arduino IDE (`ESP32 Dev Module`, baud `115200`):
 
 ```text
 firmware/esp32_ad8232_stream/esp32_ad8232_stream.ino
 ```
-
-Use board `ESP32 Dev Module` and baud `115200`.
 
 ### 2. Install Python Dependencies
 
@@ -61,15 +65,15 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-TensorFlow may require Python 3.11 or 3.12 on Windows.
+> Requires Python 3.11 or 3.12 on Windows for TensorFlow compatibility.
 
-### 3. Train Model
+### 3. Train Model (first time only)
 
 ```powershell
 python src\train_mitbih.py
 ```
 
-This downloads MIT-BIH, trains the CNN, and saves model files under `pc_app/models`.
+Downloads MIT-BIH, applies SMOTE to balance minority classes, trains the 1D CNN, and saves model files under `pc_app/models/`. Expected test accuracy: **~98.2%**.
 
 ### 4. Run Dashboard
 
@@ -77,16 +81,58 @@ This downloads MIT-BIH, trains the CNN, and saves model files under `pc_app/mode
 streamlit run src\dashboard.py
 ```
 
-Open:
+Open **http://localhost:8501** in your browser.
 
-```text
-http://localhost:8501
-```
+---
 
-Dashboard modes:
+## Dashboard Modes
 
-- `MIT-BIH preview sample`: test without hardware
-- `Live ESP32 serial`: classify ECG from the ESP32 COM port
+### MIT-BIH Preview (no hardware needed)
+
+1. Select record (e.g. `100`) and start second
+2. Click **Run MIT-BIH preview**
+
+### Live ESP32 Streaming
+
+1. Close Arduino Serial Monitor
+2. Select COM port and baud `115200`
+3. Click **▶ Start live classification**
+4. Click **⏹ Stop streaming** to halt
+
+The dashboard captures in 10-second windows continuously. The ECG chart and beat table stay visible between windows (no blank screen).
+
+---
+
+## Model Performance
+
+Trained on MIT-BIH Arrhythmia Database with SMOTE oversampling to balance minority classes (S, F):
+
+| Metric | Value |
+| --- | --- |
+| Test accuracy | **98.2%** |
+| Validation accuracy | 99.8% |
+| Training epochs | 23 (early stopping) |
+
+Training report saved to `pc_app/models/training_report.json`.
+
+---
+
+## Signal Processing
+
+### R-Peak Detection (`preprocess.py`)
+
+- Butterworth bandpass filter: **0.5–40 Hz**
+- Artifact suppression: signal clipped to **±4σ** before peak detection
+- Physiological refractory period: **0.40 s** (prevents T-wave double-detection)
+- Height floor: peaks must exceed **mean + 1σ** to reject noise blips
+- BPM range: **30–150 BPM**
+
+### ECG Chart
+
+- Display smoothing: 9-point moving average (display only, does not affect model input)
+- ECG monitor style: teal line, red R-peak markers, dark transparent background
+
+---
 
 ## Project Structure
 
@@ -97,27 +143,35 @@ firmware/
 pc_app/
   requirements.txt
   src/
-    dashboard.py
-    mitbih_labels.py
-    model.py
-    preprocess.py
-    serial_ecg.py
-    train_mitbih.py
+    dashboard.py        # Streamlit UI and live streaming logic
+    preprocess.py       # ECG filtering, R-peak detection, beat extraction
+    train_mitbih.py     # MIT-BIH download, SMOTE balancing, CNN training
+    model.py            # 1D CNN architecture definition
+    serial_ecg.py       # ESP32 serial reader
+    mitbih_labels.py    # AAMI label mapping
   data/
+    mitdb/              # Downloaded MIT-BIH records
   models/
+    ecg_aami_cnn.keras
+    ecg_aami_cnn.tflite
+    label_map.json
+    training_report.json
 GUIDE.md
+README.md
 ```
 
-## Documentation
-
-For the full explanation of wiring, firmware, ML training, preprocessing, dashboard flow, file-by-file code behavior, troubleshooting, and safety notes, read:
-
-[GUIDE.md](GUIDE.md)
+---
 
 ## Notes
 
-- The model classifies ECG beat windows, not BPM alone.
-- `Overall class` in the dashboard uses majority voting across detected beats.
-- `Latest class` shows only the most recent detected beat.
-- Close Arduino Serial Monitor before using the dashboard, because only one program can use the ESP32 COM port at a time.
+- Classification uses ECG waveform morphology, not BPM alone.
+- `Overall class` uses majority voting across all beats in the capture window.
+- `Latest class` shows the most recently classified beat.
+- Close Arduino Serial Monitor before using live mode — only one process can use a COM port at a time.
+- For best signal quality, use adhesive ECG electrode pads rather than bare metal contact.
 
+## Documentation
+
+For full wiring details, firmware explanation, preprocessing pipeline, model architecture, training steps, dashboard code flow, and troubleshooting:
+
+[GUIDE.md](GUIDE.md)
