@@ -6,9 +6,9 @@ from pathlib import Path
 import numpy as np
 import tensorflow as tf
 import wfdb
+from imblearn.over_sampling import SMOTE
 from sklearn.metrics import classification_report, confusion_matrix
 from sklearn.model_selection import train_test_split
-from sklearn.utils.class_weight import compute_class_weight
 
 from mitbih_labels import LABELS, label_to_index, map_symbol
 from model import build_model
@@ -99,9 +99,14 @@ def main() -> None:
         stratify=y,
     )
 
-    classes = np.unique(y_train)
-    weights = compute_class_weight(class_weight="balanced", classes=classes, y=y_train)
-    class_weight = {int(cls): float(weight) for cls, weight in zip(classes, weights)}
+    # Oversample minority classes (S, F) in the training split only to avoid leakage.
+    print("Applying SMOTE to balance minority classes in training set...")
+    x_train_flat = x_train.reshape(len(x_train), -1)  # (N, 256)
+    smote = SMOTE(random_state=42)
+    x_train_flat_res, y_train_res = smote.fit_resample(x_train_flat, y_train)
+    x_train = x_train_flat_res.reshape(-1, TARGET_BEAT_SAMPLES, 1).astype(np.float32)
+    y_train = y_train_res.astype(np.int64)
+    print(f"After SMOTE: {len(x_train)} training beats (was {len(x_train_flat)}).")    
 
     model = build_model(num_classes=len(LABELS))
     callbacks = [
@@ -124,7 +129,6 @@ def main() -> None:
         validation_split=0.15,
         epochs=30,
         batch_size=256,
-        class_weight=class_weight,
         callbacks=callbacks,
         verbose=1,
     )

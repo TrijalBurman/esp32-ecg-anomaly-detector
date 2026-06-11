@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import numpy as np
@@ -43,26 +44,70 @@ def estimate_sample_rate(millis: np.ndarray, fallback: float) -> float:
     return fs
 
 
+def _smooth(arr: np.ndarray, window: int = 9) -> np.ndarray:
+    """Moving-average smooth for display only — does not affect model inputs."""
+    if len(arr) < window:
+        return arr
+    kernel = np.ones(window, dtype=np.float32) / window
+    return np.convolve(arr, kernel, mode="same").astype(np.float32)
+
+
 def plot_ecg(times: np.ndarray, ecg: np.ndarray, peaks: np.ndarray) -> go.Figure:
+    ecg_display = _smooth(ecg)          # smoothed only for the chart
+    peak_y = ecg_display[peaks] if peaks.size else np.array([])
+
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=times, y=ecg, mode="lines", name="ECG"))
+
+    # ECG trace — bright teal like a real monitor
+    fig.add_trace(
+        go.Scatter(
+            x=times,
+            y=ecg_display,
+            mode="lines",
+            name="ECG",
+            line=dict(color="#00e5cc", width=1.4),
+        )
+    )
+
+    # R-peak markers — red circles
     if peaks.size:
         fig.add_trace(
             go.Scatter(
                 x=times[peaks],
-                y=ecg[peaks],
+                y=peak_y,
                 mode="markers",
                 name="R-peaks",
-                marker=dict(size=8),
+                marker=dict(size=9, color="#ff4d6d", symbol="circle",
+                            line=dict(color="#ffffff", width=1)),
             )
         )
+
     fig.update_layout(
-        height=420,
-        margin=dict(l=20, r=20, t=30, b=20),
-        xaxis_title="Seconds",
-        yaxis_title="Filtered ECG",
+        height=340,
+        margin=dict(l=10, r=10, t=10, b=10),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(255,255,255,0.03)",
+        legend=dict(
+            orientation="h",
+            x=1, xanchor="right",
+            y=1.02, yanchor="bottom",
+            font=dict(color="#cccccc", size=12),
+        ),
+        xaxis=dict(
+            title=dict(text="Seconds", font=dict(color="#aaaaaa", size=12)),
+            tickfont=dict(color="#aaaaaa"),
+            gridcolor="rgba(255,255,255,0.07)",
+            zerolinecolor="rgba(255,255,255,0.15)",
+        ),
+        yaxis=dict(
+            title=dict(text="ECG (V)", font=dict(color="#aaaaaa", size=12)),
+            tickfont=dict(color="#aaaaaa"),
+            gridcolor="rgba(255,255,255,0.07)",
+            zerolinecolor="rgba(255,255,255,0.15)",
+        ),
     )
     return fig
+
 
 
 @st.cache_data
@@ -140,6 +185,16 @@ def main() -> None:
     st.set_page_config(page_title="ESP32 ECG Anomaly Dashboard", layout="wide")
     st.title("ESP32 ECG Anomaly Dashboard")
 
+    # ------------------------------------------------------------------
+    # Session state: tracks whether live streaming is active.
+    # ------------------------------------------------------------------
+    if "live_running" not in st.session_state:
+        st.session_state.live_running = False
+    if "ecg_figure" not in st.session_state:
+        st.session_state.ecg_figure = None
+    if "last_predictions" not in st.session_state:
+        st.session_state.last_predictions = None
+
     ports = available_ports()
     with st.sidebar:
         st.header("Mode")
@@ -162,9 +217,22 @@ def main() -> None:
         preview_record = st.selectbox("MIT-BIH record", ["100", "101", "103", "105", "106", "200", "208"])
         preview_start = st.slider("Preview start second", min_value=0, max_value=120, value=10)
 
-        run_label = "Run MIT-BIH preview" if mode == "MIT-BIH preview sample" else "Start live classification"
-        run_disabled = mode == "Live ESP32 serial" and not ports
-        run = st.button(run_label, type="primary", disabled=run_disabled)
+        if mode == "Live ESP32 serial":
+            # If the user switches away from live mode, reset running state.
+            run_disabled = not ports
+            if st.session_state.live_running:
+                if st.button("⏹ Stop streaming", type="secondary"):
+                    st.session_state.live_running = False
+                    st.rerun()
+            else:
+                if st.button("▶ Start live classification", type="primary", disabled=run_disabled):
+                    st.session_state.live_running = True
+                    st.rerun()
+            run = st.session_state.live_running
+        else:
+            # Switching to preview mode cancels any live session.
+            st.session_state.live_running = False
+            run = st.button("Run MIT-BIH preview", type="primary")
 
     try:
         model, labels = load_classifier()
@@ -174,9 +242,22 @@ def main() -> None:
         return
 
     status = st.empty()
-    chart = st.empty()
+
+    # Always render the last ECG figure so the chart is visible
+    # during the next capture window (persisted across reruns).
+    chart_slot = st.empty()
+    if st.session_state.ecg_figure is not None:
+        chart_slot.plotly_chart(st.session_state.ecg_figure, width='stretch')
+
     metrics = st.container()
+
+    # Show previous predictions table while next window is being captured.
     table = st.empty()
+    if st.session_state.last_predictions is not None:
+        if st.session_state.last_predictions:
+            table.dataframe(st.session_state.last_predictions, width='stretch', hide_index=True)
+        else:
+            table.warning("No complete beat windows were available for classification.")
 
     if not run:
         status.info("Run the MIT-BIH preview, or connect the ESP32 and start live classification.")
@@ -203,6 +284,7 @@ def main() -> None:
 
         if len(samples) < int(sample_rate * 2):
             status.error("Not enough samples received. Check COM port, baud rate, and Arduino Serial Monitor.")
+            st.session_state.live_running = False
             return
 
         millis, volts, lead_off = samples_to_arrays(samples)
@@ -217,7 +299,10 @@ def main() -> None:
     predictions = classify_beats(model, labels, ecg, peaks, actual_sample_rate)
 
     status.success(f"Processed {sample_count} samples and detected {len(peaks)} beats.")
-    chart.plotly_chart(plot_ecg(times, ecg, peaks), use_container_width=True)
+
+    # Persist the new figure and update the slot immediately.
+    st.session_state.ecg_figure = plot_ecg(times, ecg, peaks)
+    chart_slot.plotly_chart(st.session_state.ecg_figure, width='stretch')
 
     latest = predictions[-1]["class"] if predictions else "None"
     latest_confidence = predictions[-1]["confidence"] if predictions else 0.0
@@ -232,10 +317,24 @@ def main() -> None:
     col6.metric("Latest confidence", f"{latest_confidence:.2f}")
     st.caption(f"Sample rate: {actual_sample_rate:.1f} Hz | Lead-off samples: {lead_off_pct:.1f}%")
 
+    # Persist predictions and update the table immediately.
+    st.session_state.last_predictions = predictions
     if predictions:
-        table.dataframe(predictions, use_container_width=True, hide_index=True)
+        table.dataframe(predictions, width='stretch', hide_index=True)
     else:
         table.warning("No complete beat windows were available for classification.")
+
+    # Lead-off warning: shown when electrodes lose skin contact for >10% of the window.
+    if lead_off_pct > 10.0:
+        st.warning(
+            f"⚠️ Lead-off detected in {lead_off_pct:.1f}% of samples — "
+            "check electrode placement and skin contact quality."
+        )
+
+    # Continuous live streaming: wait briefly then rerun to capture the next window.
+    if mode == "Live ESP32 serial" and st.session_state.live_running:
+        time.sleep(0.3)
+        st.rerun()
 
 
 if __name__ == "__main__":

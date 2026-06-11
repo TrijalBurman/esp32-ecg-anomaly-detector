@@ -58,9 +58,21 @@ def detect_r_peaks(samples: np.ndarray, fs: float) -> np.ndarray:
     if abs(np.min(centered)) > abs(np.max(centered)):
         centered = -centered
 
-    min_distance = int(0.25 * fs)
+    # Suppress extreme-amplitude artifacts (e.g. electrode lift-off at end of
+    # recording) by clipping to ±4σ before peak detection.
+    clip_val = 4.0 * float(np.std(centered))
+    if clip_val > 0:
+        centered = np.clip(centered, -clip_val, clip_val)
+
+    # Physiological refractory period: 0.40 s = max 150 BPM.
+    # This prevents the T-wave (which arrives ~0.30 s after the R-peak)
+    # from being double-counted as a second beat, which was causing
+    # BPM to read ~2x the true heart rate on noisy signals.
+    min_distance = int(0.40 * fs)
     prominence = max(0.05, float(np.std(centered) * 0.8))
-    peaks, _ = signal.find_peaks(centered, distance=min_distance, prominence=prominence)
+    # Require peaks to be well above the signal mean to reject noise blips.
+    height = float(np.mean(centered) + 1.0 * np.std(centered))
+    peaks, _ = signal.find_peaks(centered, distance=min_distance, prominence=prominence, height=height)
     return peaks.astype(int)
 
 
@@ -68,7 +80,9 @@ def bpm_from_peaks(peaks: np.ndarray, fs: float) -> float | None:
     if len(peaks) < 2:
         return None
     rr = np.diff(peaks) / fs
-    rr = rr[(rr > 0.25) & (rr < 2.5)]
+    # Physiological range: 30–150 BPM (RR 0.4 s – 2.0 s).
+    # Upper bound matches the 0.40 s min_distance in detect_r_peaks.
+    rr = rr[(rr > 0.40) & (rr < 2.0)]
     if rr.size == 0:
         return None
     return float(60.0 / np.median(rr))
